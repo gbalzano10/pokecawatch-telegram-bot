@@ -61,4 +61,19 @@ jobs:
           git config user.email "github-actions@github.com"
           git add -f data/sent_lotteries.db
           git diff --cached --quiet || git commit -m "Update sent lottery database"
-          git push
+          git push      - name: Save sent database
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add -f data/sent_lotteries.db
+
+          if git diff --cached --quiet; then
+            echo "No database changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Update sent lottery database"
+
+          git pull --rebase origin main
+          git push origin main
