@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: pokecawatch-bot
+  cancel-in-progress: false
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -43,6 +47,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: true
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -59,12 +64,11 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add -f data/sent_lotteries.db
-          git diff --cached --quiet || git commit -m "Update sent lottery database"
-          git push      - name: Save sent database
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+
+          if [ ! -f data/sent_lotteries.db ]; then
+            echo "Database not found, nothing to save."
+            exit 0
+          fi
 
           git add -f data/sent_lotteries.db
 
@@ -74,6 +78,5 @@ jobs:
           fi
 
           git commit -m "Update sent lottery database"
-
           git pull --rebase origin main
-          git push origin main
+          git push origin HEAD:main
