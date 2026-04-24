@@ -1,0 +1,64 @@
+name: Pokecawatch Telegram Bot
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      RUN_ONCE: "1"
+
+      SEND_ON_FIRST_RUN: "1"
+      DEBUG: "1"
+
+      MAX_ARTICLES: "3"
+
+      ACTIVE_ONLY: "1"
+      NOTIFY_UPCOMING: "0"
+
+      STRICT_CURRENT_MONTH: "0"
+      END_ONLY_MAX_DAYS_AHEAD: "21"
+
+      REQUEST_DELAY_SECONDS: "2"
+      MESSAGE_DELAY_SECONDS: "3"
+      TRANSLATION_DELAY_SECONDS: "0.7"
+
+      TRANSLATE_ENABLED: "1"
+      MAX_TRANSLATION_CHARS: "120"
+
+      DB_PATH: "data/sent_lotteries.db"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot once
+        run: python bot.py
+
+      - name: Save sent database
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add -f data/sent_lotteries.db
+          git diff --cached --quiet || git commit -m "Update sent lottery database"
+          git push
