@@ -1,0 +1,9 @@
+services:
+  pokecawatch-bot:
+    build: .
+    container_name: pokecawatch-telegram-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
