@@ -2,7 +2,7 @@ name: Pokecawatch Telegram Bot
 
 on:
   schedule:
-    - cron: "0 8 * * *"
+    - cron: "17 8 * * *"
   workflow_dispatch:
 
 permissions:
@@ -22,7 +22,14 @@ jobs:
 
       RUN_ONCE: "1"
 
+      SEND_INDIVIDUAL_NOTIFICATIONS: "1"
       SEND_ON_FIRST_RUN: "1"
+
+      SEND_DAILY_SUMMARY: "1"
+      SUMMARY_DEDUP_BY_DAY: "1"
+      SUMMARY_MAX_ITEMS_PER_MESSAGE: "10"
+      SEND_EMPTY_SUMMARY: "0"
+
       DEBUG: "1"
 
       MAX_ARTICLES: "3"

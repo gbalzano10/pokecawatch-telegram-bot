@@ -31,13 +31,10 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 CHECK_EVERY_SECONDS = int(os.getenv("CHECK_EVERY_SECONDS", "300"))
 
-# Se RUN_ONCE=1, il bot fa un solo controllo e poi termina.
-# Utile per GitHub Actions / cron giornaliero.
 RUN_ONCE = os.getenv("RUN_ONCE", "0").strip().lower() in {
     "1", "true", "yes", "si", "sì"
 }
 
-# Consiglio: tieni 3 per evitare espansioni vecchie.
 MAX_ARTICLES = int(os.getenv("MAX_ARTICLES", "3"))
 
 SEND_ON_FIRST_RUN = os.getenv("SEND_ON_FIRST_RUN", "0").strip().lower() in {
@@ -48,21 +45,16 @@ DEBUG = os.getenv("DEBUG", "1").strip().lower() in {
     "1", "true", "yes", "si", "sì"
 }
 
-# Invia solo lotterie realmente aperte ora.
 ACTIVE_ONLY = os.getenv("ACTIVE_ONLY", "1").strip().lower() in {
     "1", "true", "yes", "si", "sì"
 }
 
-# Di default NON invia upcoming.
 NOTIFY_UPCOMING = os.getenv("NOTIFY_UPCOMING", "0").strip().lower() in {
     "1", "true", "yes", "si", "sì"
 }
 
-# Se una scadenza senza anno e senza data di inizio è troppo lontana,
-# viene ignorata per evitare vecchie raffle interpretate come future.
 END_ONLY_MAX_DAYS_AHEAD = int(os.getenv("END_ONLY_MAX_DAYS_AHEAD", "21"))
 
-# Se 1, per date senza inizio accetta solo scadenze nel mese corrente.
 STRICT_CURRENT_MONTH = os.getenv("STRICT_CURRENT_MONTH", "0").strip().lower() in {
     "1", "true", "yes", "si", "sì"
 }
@@ -76,6 +68,24 @@ TRANSLATE_ENABLED = os.getenv("TRANSLATE_ENABLED", "1").strip().lower() in {
 }
 
 MAX_TRANSLATION_CHARS = int(os.getenv("MAX_TRANSLATION_CHARS", "120"))
+
+SEND_INDIVIDUAL_NOTIFICATIONS = os.getenv("SEND_INDIVIDUAL_NOTIFICATIONS", "1").strip().lower() in {
+    "1", "true", "yes", "si", "sì"
+}
+
+SEND_DAILY_SUMMARY = os.getenv("SEND_DAILY_SUMMARY", "1").strip().lower() in {
+    "1", "true", "yes", "si", "sì"
+}
+
+SUMMARY_DEDUP_BY_DAY = os.getenv("SUMMARY_DEDUP_BY_DAY", "1").strip().lower() in {
+    "1", "true", "yes", "si", "sì"
+}
+
+SUMMARY_MAX_ITEMS_PER_MESSAGE = int(os.getenv("SUMMARY_MAX_ITEMS_PER_MESSAGE", "10"))
+
+SEND_EMPTY_SUMMARY = os.getenv("SEND_EMPTY_SUMMARY", "0").strip().lower() in {
+    "1", "true", "yes", "si", "sì"
+}
 
 DB_PATH = os.getenv("DB_PATH", "data/sent_lotteries.db")
 
@@ -376,6 +386,19 @@ def mark_sent(item_id: str, item: LotteryItem) -> None:
     conn.close()
 
 
+def mark_raw_sent(item_id: str, payload: dict) -> None:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute(
+        "INSERT OR IGNORE INTO sent (id, payload) VALUES (?, ?)",
+        (item_id, json.dumps(payload, ensure_ascii=False)),
+    )
+
+    conn.commit()
+    conn.close()
+
+
 def is_first_run() -> bool:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -518,9 +541,6 @@ def parse_date_window(raw_date: str) -> DateWindow | None:
         except ValueError:
             return None
 
-    # Filtro anti-date ambigue senza anno.
-    # Esempio: siamo ad aprile e appare "7/20まで".
-    # Senza anno potrebbe essere una vecchia riga interpretata come futura.
     if not has_any_explicit_year and not has_range:
         days_ahead = (end_dt - now).total_seconds() / 86400
 
@@ -815,7 +835,6 @@ def extract_lottery_rows(article: Article) -> tuple[list[LotteryItem], dict[str,
                 items.extend(table_items)
                 merge_stats(stats, table_stats)
 
-    # Fallback: cerca qualunque tabella con colonna 締め切り.
     if not items and stats["expired"] == 0 and stats["upcoming"] == 0 and stats["invalid"] == 0:
         for table in container.find_all("table"):
             table_text = clean_text(table.get_text(" ", strip=True))
@@ -916,14 +935,12 @@ def build_message(item: LotteryItem) -> str:
     return message
 
 
-def send_telegram_message(item: LotteryItem) -> None:
+def send_telegram_html_message(message: str) -> None:
     if not BOT_TOKEN:
-        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN in .env")
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN in .env or secrets")
 
     if not CHAT_ID:
-        raise RuntimeError("Missing TELEGRAM_CHAT_ID in .env")
-
-    message = build_message(item)
+        raise RuntimeError("Missing TELEGRAM_CHAT_ID in .env or secrets")
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
@@ -957,6 +974,160 @@ def send_telegram_message(item: LotteryItem) -> None:
         break
 
 
+def send_telegram_message(item: LotteryItem) -> None:
+    message = build_message(item)
+    send_telegram_html_message(message)
+
+
+# ============================================================
+# DAILY SUMMARY
+# ============================================================
+
+def build_summary_entry(index: int, item: LotteryItem) -> str:
+    expansion_line = item.expansion_en
+    if item.expansion_en != item.expansion_jp:
+        expansion_line = f"{item.expansion_en} / {item.expansion_jp}"
+
+    place_line = item.place_en
+    if item.place_en != item.place_jp:
+        place_line = f"{item.place_en} / {item.place_jp}"
+
+    lines = [
+        f"<b>{index}) {html.escape(expansion_line)}</b>",
+        f"📍 <b>Place:</b> {html.escape(place_line)}",
+        f"🏷️ <b>Type:</b> {html.escape(item.raffle_type)}",
+        f"🗓️ <b>Deadline:</b> {html.escape(item.date_en)}",
+    ]
+
+    if item.raffle_type == "Online website":
+        if item.lottery_url:
+            lines.append(
+                f'🔗 <b>Link Raffle:</b> <a href="{html.escape(item.lottery_url)}">Open raffle page</a>'
+            )
+        else:
+            lines.append("🔗 <b>Link Raffle:</b> Not available")
+    else:
+        lines.append("🏬 <b>Application:</b> Physical in-store")
+
+    lines.append(
+        f'📰 <a href="{html.escape(item.source_url)}">Pokecawatch source</a>'
+    )
+
+    return "\n".join(lines)
+
+
+def build_summary_messages(items: list[LotteryItem]) -> list[str]:
+    now_label = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
+
+    if not items:
+        if not SEND_EMPTY_SUMMARY:
+            return []
+
+        return [
+            (
+                "📌 <b>Active Pokémon TCG JP Raffles</b>\n\n"
+                f"🕘 <b>Last update:</b> {html.escape(now_label)}\n\n"
+                "No active raffles found at the moment."
+            )
+        ]
+
+    header = (
+        "📌 <b>Active Pokémon TCG JP Raffles</b>\n\n"
+        f"🕘 <b>Last update:</b> {html.escape(now_label)}\n"
+        f"🎯 <b>Total active raffles:</b> {len(items)}\n\n"
+    )
+
+    messages: list[str] = []
+    current_message = header
+    current_count = 0
+
+    for index, item in enumerate(items, start=1):
+        entry = build_summary_entry(index, item)
+        block = entry + "\n\n"
+
+        if (
+            current_count >= SUMMARY_MAX_ITEMS_PER_MESSAGE
+            or len(current_message) + len(block) > 3600
+        ):
+            messages.append(current_message.strip())
+            current_message = header
+            current_count = 0
+
+        current_message += block
+        current_count += 1
+
+    if current_message.strip() != header.strip():
+        messages.append(current_message.strip())
+
+    if len(messages) > 1:
+        total_parts = len(messages)
+        messages = [
+            msg.replace(
+                "📌 <b>Active Pokémon TCG JP Raffles</b>",
+                f"📌 <b>Active Pokémon TCG JP Raffles</b> — Part {i}/{total_parts}",
+                1,
+            )
+            for i, msg in enumerate(messages, start=1)
+        ]
+
+    return messages
+
+
+def make_summary_id(items: list[LotteryItem]) -> str:
+    today = datetime.now(JST).strftime("%Y-%m-%d")
+
+    item_ids = sorted(make_item_id(item) for item in items)
+    raw_hash = hashlib.sha256("|".join(item_ids).encode("utf-8")).hexdigest()[:16]
+
+    if SUMMARY_DEDUP_BY_DAY:
+        return f"daily_summary|{today}|{raw_hash}"
+
+    timestamp = datetime.now(JST).strftime("%Y-%m-%d_%H-%M-%S")
+    return f"daily_summary|{timestamp}|{raw_hash}"
+
+
+def send_daily_summary(items: list[LotteryItem]) -> None:
+    unique: dict[str, LotteryItem] = {}
+
+    for item in items:
+        key = (
+            f"{item.expansion_jp}|"
+            f"{item.place_jp}|"
+            f"{item.area_jp}|"
+            f"{item.date_raw}|"
+            f"{item.lottery_url or ''}"
+        )
+        unique[key] = item
+
+    items = list(unique.values())
+
+    summary_messages = build_summary_messages(items)
+
+    if not summary_messages:
+        print("Daily summary skipped: no active raffles.")
+        return
+
+    summary_id = make_summary_id(items)
+
+    if already_sent(summary_id):
+        print("Daily summary already sent for this active raffle set.")
+        return
+
+    for message in summary_messages:
+        send_telegram_html_message(message)
+
+    mark_raw_sent(
+        summary_id,
+        {
+            "type": "daily_summary",
+            "items_count": len(items),
+            "sent_at_jst": datetime.now(JST).isoformat(),
+        },
+    )
+
+    print(f"Daily summary sent. Active raffles included: {len(items)}.")
+
+
 # ============================================================
 # MAIN CHECK
 # ============================================================
@@ -977,6 +1148,8 @@ def check_once() -> tuple[int, int, int, int, int]:
     total_invalid = 0
     total_sent = 0
 
+    all_active_items: list[LotteryItem] = []
+
     for article in articles:
         try:
             rows, stats = extract_lottery_rows(article)
@@ -989,6 +1162,8 @@ def check_once() -> tuple[int, int, int, int, int]:
         total_expired += stats.get("expired", 0)
         total_invalid += stats.get("invalid", 0)
 
+        all_active_items.extend(rows)
+
         if DEBUG:
             print(
                 f"{article.expansion_jp}: "
@@ -997,6 +1172,9 @@ def check_once() -> tuple[int, int, int, int, int]:
                 f"{stats.get('expired', 0)} scadute ignorate, "
                 f"{stats.get('invalid', 0)} righe non valide"
             )
+
+        if not SEND_INDIVIDUAL_NOTIFICATIONS:
+            continue
 
         for item in rows:
             item_id = make_item_id(item)
@@ -1022,6 +1200,12 @@ def check_once() -> tuple[int, int, int, int, int]:
             except Exception as exc:
                 print(f"Errore invio Telegram: {exc}")
 
+    if SEND_DAILY_SUMMARY:
+        try:
+            send_daily_summary(all_active_items)
+        except Exception as exc:
+            print(f"Errore invio daily summary: {exc}")
+
     return total_open_now, total_upcoming, total_expired, total_invalid, total_sent
 
 
@@ -1035,7 +1219,12 @@ def print_startup_info() -> None:
     print(f"Modalità esecuzione singola RUN_ONCE: {'sì' if RUN_ONCE else 'no'}")
     print(f"Controllo ogni {CHECK_EVERY_SECONDS} secondi.")
     print(f"Max articoli/espansioni analizzate: {MAX_ARTICLES}")
+    print(f"Invio notifiche singole: {'sì' if SEND_INDIVIDUAL_NOTIFICATIONS else 'no'}")
     print(f"Invio al primo avvio: {'sì' if SEND_ON_FIRST_RUN else 'no'}")
+    print(f"Invio riepilogo giornaliero: {'sì' if SEND_DAILY_SUMMARY else 'no'}")
+    print(f"Deduplica riepilogo giornaliero: {'sì' if SUMMARY_DEDUP_BY_DAY else 'no'}")
+    print(f"Max raffle per messaggio riepilogo: {SUMMARY_MAX_ITEMS_PER_MESSAGE}")
+    print(f"Invio riepilogo vuoto: {'sì' if SEND_EMPTY_SUMMARY else 'no'}")
     print(f"Solo lotterie attive ora: {'sì' if ACTIVE_ONLY else 'no'}")
     print(f"Invio upcoming: {'sì' if NOTIFY_UPCOMING else 'no'}")
     print(f"Filtro mese corrente stretto: {'sì' if STRICT_CURRENT_MONTH else 'no'}")
@@ -1054,7 +1243,7 @@ def print_result(open_now: int, upcoming: int, expired: int, invalid: int, sent:
         f"Upcoming ignorate: {upcoming}. "
         f"Scadute ignorate: {expired}. "
         f"Righe non valide: {invalid}. "
-        f"Nuove inviate: {sent}."
+        f"Nuove singole inviate: {sent}."
     )
 
 
