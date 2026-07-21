@@ -27,6 +27,7 @@ BASE_URL = "https://pokecawatch.com"
 CATEGORY_URL = "https://pokecawatch.com/category/%E6%8A%BD%E9%81%B8%E3%83%BB%E4%BA%88%E7%B4%84%E6%83%85%E5%A0%B1"
 
 CARDCHUSEN_ONEPIECE_URL = "https://www.cardchusen.com/onepiece"
+NYUKANOW_DRAGONBALL_URL = "https://nyuka-now.com/archives/141863"
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -98,6 +99,26 @@ ENABLE_ONEPIECE = os.getenv("ENABLE_ONEPIECE", "0").strip().lower() in {
 }
 
 MAX_ONEPIECE_ITEMS = int(os.getenv("MAX_ONEPIECE_ITEMS", "30"))
+
+ENABLE_DRAGONBALL = os.getenv("ENABLE_DRAGONBALL", "0").strip().lower() in {
+    "1", "true", "yes", "si", "sì"
+}
+
+MAX_DRAGONBALL_ITEMS = int(os.getenv("MAX_DRAGONBALL_ITEMS", "30"))
+
+DRAGONBALL_STRICT_LOTTERY_ONLY = os.getenv("DRAGONBALL_STRICT_LOTTERY_ONLY", "1").strip().lower() in {
+    "1", "true", "yes", "si", "sì"
+}
+
+DRAGONBALL_SKIP_MIXED_TCG_ROWS = os.getenv("DRAGONBALL_SKIP_MIXED_TCG_ROWS", "1").strip().lower() in {
+    "1", "true", "yes", "si", "sì"
+}
+
+# If disabled, Dragon Ball accepts only explicit lottery blocks such as 抽選形式 / WEB抽選 / アプリ抽選.
+# If enabled, it also includes invitation-based sales such as Amazon 招待制販売.
+DRAGONBALL_INCLUDE_INVITE_SALES = os.getenv("DRAGONBALL_INCLUDE_INVITE_SALES", "0").strip().lower() in {
+    "1", "true", "yes", "si", "sì"
+}
 
 DB_PATH = os.getenv("DB_PATH", "data/sent_lotteries.db")
 
@@ -213,6 +234,13 @@ COMMON_TRANSLATIONS = {
     "蒼海の七傑": "The Azure Sea's Seven",
     "新たなる皇帝 [OP-09]": "OP-09 - The New Emperor",
     "29周年記念プロモ8枚セット": "29th Anniversary Promo 8-Card Set",
+
+    "しまむらパーク": "Shimamura Park",
+    "ドラゴンボールスーパーカードゲーム フュージョンワールド MANGA BOOSTER 02 SB02": "Dragon Ball Super Card Game Fusion World MANGA BOOSTER 02 [SB02]",
+    "ドラゴンボールスーパーカードゲーム フュージョンワールド ブースターパック 限界を超えし者 FB04": "Dragon Ball Super Card Game Fusion World Booster Pack Beyond the Limits [FB04]",
+    "ドラゴンボールスーパーカードゲーム フュージョンワールド ブースターパック 怒りの咆哮 FB03": "Dragon Ball Super Card Game Fusion World Booster Pack Raging Roar [FB03]",
+    "ドラゴンボールスーパーカードゲーム フュージョンワールド ブースターパック 覚醒の鼓動 FB01": "Dragon Ball Super Card Game Fusion World Booster Pack Awakened Pulse [FB01]",
+    "ドラゴンボールスーパーカードゲーム フュージョンワールド ブースターパック 烈火の闘気 FB02": "Dragon Ball Super Card Game Fusion World Booster Pack Blazing Aura [FB02]",
 
     "北海道": "Hokkaido",
     "青森県": "Aomori",
@@ -462,6 +490,8 @@ def normalize_date_text(text: str) -> str:
     text = text.replace("－", "～")
     text = text.replace("—", "～")
     text = text.replace("–", "～")
+
+    text = re.sub(r"[（(][月火水木金土日][）)]", "", text)
 
     text = re.sub(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日", r"\1/\2/\3", text)
     text = re.sub(r"(\d{1,2})月\s*(\d{1,2})日", r"\1/\2", text)
@@ -1140,6 +1170,463 @@ def extract_cardchusen_onepiece_rows() -> tuple[list[LotteryItem], dict[str, int
 
 
 # ============================================================
+# NYUKA NOW DRAGON BALL PARSER
+# ============================================================
+
+NYUKANOW_FIELD_LABELS = {
+    "対象商品",
+    "対象商品詳細",
+    "抽選形式",
+    "販売形式",
+    "開始日",
+    "終了日",
+    "締切",
+    "応募終了",
+    "当選発表",
+    "応募条件",
+    "特記事項",
+    "応募ページ",
+    "詳細ページ",
+    "販売ページ",
+}
+
+
+def clean_nyukanow_value(text: str) -> str:
+    text = clean_text(text)
+    text = text.strip("：: ")
+    return clean_text(text)
+
+
+def clean_dragonball_product_name(text: str) -> str:
+    text = clean_text(text)
+
+    if not text:
+        return "Dragon Ball Fusion World"
+
+    text = text.replace("バンダイ(BANDAI)", "")
+    text = text.replace("※販売元要確認※", "")
+    text = text.replace("(BOX)24パック入り", "")
+    text = text.replace("BOX24パック入り", "")
+    text = re.sub(r"（価格：.*?）", "", text)
+    text = re.sub(r"※.*$", "", text)
+
+    return clean_text(text)
+
+
+
+DRAGONBALL_EXPLICIT_LOTTERY_KEYWORDS = {
+    "抽選",
+    "抽選形式",
+    "抽選販売",
+    "抽選応募",
+    "事前抽選",
+    "WEB抽選",
+    "Web抽選",
+    "アプリ抽選",
+}
+
+DRAGONBALL_INVITE_SALE_KEYWORDS = {
+    "招待制販売",
+    "招待リクエスト",
+    "リクエスト",
+    "request invitation",
+    "invite",
+}
+
+DRAGONBALL_OTHER_TCG_KEYWORDS = {
+    "ポケモン",
+    "ポケカ",
+    "ワンピース",
+    "ONE PIECE",
+    "遊戯王",
+}
+
+
+def is_dragonball_product_row(product_jp: str) -> bool:
+    product_jp = clean_text(product_jp)
+
+    if not product_jp:
+        return False
+
+    if any(keyword in product_jp for keyword in ["ドラゴンボール", "フュージョンワールド"]):
+        return True
+
+    if re.search(r"(?:FB|FS|SB|FP)\d{2}", product_jp, flags=re.IGNORECASE):
+        return True
+
+    return False
+
+
+def is_mixed_tcg_row(product_jp: str) -> bool:
+    product_jp = clean_text(product_jp)
+
+    if not DRAGONBALL_SKIP_MIXED_TCG_ROWS:
+        return False
+
+    return any(keyword in product_jp for keyword in DRAGONBALL_OTHER_TCG_KEYWORDS)
+
+
+def is_explicit_dragonball_lottery_method(method_text: str) -> bool:
+    method_text = clean_text(method_text)
+
+    if not method_text:
+        return False
+
+    return any(
+        keyword.lower() in method_text.lower()
+        for keyword in DRAGONBALL_EXPLICIT_LOTTERY_KEYWORDS
+    )
+
+
+def is_dragonball_invite_sale(method_text: str, lines: list[str]) -> bool:
+    combined = clean_text(" ".join([method_text, " ".join(lines)]))
+
+    if not combined:
+        return False
+
+    return any(
+        keyword.lower() in combined.lower()
+        for keyword in DRAGONBALL_INVITE_SALE_KEYWORDS
+    )
+
+
+def is_strict_dragonball_lottery_block(
+    store_jp: str,
+    product_jp: str,
+    method_text: str,
+    lines: list[str],
+) -> bool:
+    if not DRAGONBALL_STRICT_LOTTERY_ONLY:
+        return True
+
+    if is_explicit_dragonball_lottery_method(method_text):
+        return True
+
+    if DRAGONBALL_INCLUDE_INVITE_SALES and is_dragonball_invite_sale(method_text, lines):
+        return True
+
+    return False
+
+
+def get_nyukanow_field_value(lines: list[str], labels: set[str]) -> str:
+    for index, line in enumerate(lines):
+        line = clean_text(line)
+
+        for label in labels:
+            if not line.startswith(label):
+                continue
+
+            value = clean_nyukanow_value(line[len(label):])
+
+            if value:
+                return value
+
+            collected: list[str] = []
+            cursor = index + 1
+
+            while cursor < len(lines):
+                next_line = clean_text(lines[cursor])
+
+                if not next_line:
+                    cursor += 1
+                    continue
+
+                if any(next_line.startswith(field_label) for field_label in NYUKANOW_FIELD_LABELS):
+                    break
+
+                if next_line.startswith("・"):
+                    collected.append(next_line.lstrip("・ "))
+                elif collected:
+                    collected.append(next_line)
+                else:
+                    collected.append(next_line)
+
+                cursor += 1
+
+            return clean_text(" / ".join(collected))
+
+    return ""
+
+
+def extract_nyukanow_relevant_link(nodes: list) -> str | None:
+    preferred_keywords = ["応募ページ", "詳細ページ", "販売ページ"]
+
+    for keyword in preferred_keywords:
+        for node in nodes:
+            if not hasattr(node, "find_all"):
+                continue
+
+            for link in node.find_all("a", href=True):
+                link_text = clean_text(link.get_text(" ", strip=True))
+                parent_text = clean_text(link.parent.get_text(" ", strip=True)) if link.parent else link_text
+
+                if keyword not in link_text and keyword not in parent_text:
+                    continue
+
+                href = clean_text(link.get("href", ""))
+
+                if not href or href.startswith("#"):
+                    continue
+
+                return urljoin(NYUKANOW_DRAGONBALL_URL, href)
+
+    return None
+
+
+def extract_nyukanow_store_blocks(soup: BeautifulSoup) -> list[tuple[str, list]]:
+    container = (
+        soup.select_one(".entry-content")
+        or soup.select_one("article")
+        or soup.select_one("main")
+        or soup.body
+        or soup
+    )
+
+    start_heading = None
+
+    for heading in container.find_all(["h2", "h3"]):
+        heading_text = clean_text(heading.get_text(" ", strip=True))
+
+        if "抽選・予約応募受付中" in heading_text:
+            start_heading = heading
+            break
+
+    if start_heading is None:
+        return []
+
+    blocks: list[tuple[str, list]] = []
+    current_store = ""
+    current_nodes: list = []
+
+    for sibling in start_heading.find_next_siblings():
+        name = getattr(sibling, "name", None)
+
+        if name == "h2":
+            heading_text = clean_text(sibling.get_text(" ", strip=True))
+
+            if any(stop in heading_text for stop in ["先着販売", "販売履歴", "応募受付終了", "過去の抽選"]):
+                break
+
+        if name == "h3":
+            if current_store:
+                blocks.append((current_store, current_nodes))
+
+            current_store = clean_text(sibling.get_text(" ", strip=True))
+            current_nodes = []
+            continue
+
+        if current_store:
+            current_nodes.append(sibling)
+
+    if current_store:
+        blocks.append((current_store, current_nodes))
+
+    return blocks
+
+
+def get_nyukanow_block_lines(nodes: list) -> list[str]:
+    text_parts: list[str] = []
+
+    for node in nodes:
+        if not hasattr(node, "get_text"):
+            continue
+
+        text_parts.append(node.get_text("\n", strip=True))
+
+    lines = [
+        clean_text(line)
+        for part in text_parts
+        for line in part.splitlines()
+        if clean_text(line)
+    ]
+
+    return lines
+
+
+def parse_nyukanow_single_datetime(raw_date: str, is_end: bool = False) -> datetime | None:
+    raw_date = clean_text(raw_date)
+
+    if not raw_date:
+        return None
+
+    normalized = normalize_date_text(raw_date)
+    match = DATE_RE.search(normalized)
+
+    if not match:
+        return None
+
+    return build_datetime_from_match(match, datetime.now(JST), is_end=is_end)
+
+
+def build_nyukanow_date_window(start_raw: str, end_raw: str) -> DateWindow:
+    start_raw = clean_text(start_raw)
+    end_raw = clean_text(end_raw)
+    now = datetime.now(JST)
+
+    if end_raw:
+        parsed = parse_date_window(end_raw)
+
+        if parsed is not None:
+            return parsed
+
+    start_dt = parse_nyukanow_single_datetime(start_raw, is_end=False) if start_raw else None
+
+    if start_dt is not None:
+        is_upcoming = now < start_dt
+        is_open_now = not is_upcoming
+        label = f"from {format_dt(start_dt)} JST / no deadline listed"
+
+        return DateWindow(
+            raw=start_raw,
+            start=start_dt,
+            end=None,
+            is_expired=False,
+            is_upcoming=is_upcoming,
+            is_open_now=is_open_now,
+            label_en=label,
+        )
+
+    return DateWindow(
+        raw="No deadline listed",
+        start=None,
+        end=None,
+        is_expired=False,
+        is_upcoming=False,
+        is_open_now=True,
+        label_en="currently accepting / no deadline listed",
+    )
+
+
+def infer_dragonball_raffle_type(method_text: str, store_jp: str) -> tuple[str, str, str]:
+    combined = f"{method_text} {store_jp}"
+
+    if any(keyword in combined for keyword in ["オンライン", "WEB", "Web", "アプリ", "招待制"]):
+        return "Online website", "オンライン / website", "Online / website"
+
+    if "店頭" in combined:
+        return "Physical in-store", "店舗", "Physical stores"
+
+    return "Online website", "オンライン / website", "Online / website"
+
+
+def extract_nyukanow_dragonball_rows() -> tuple[list[LotteryItem], dict[str, int]]:
+    soup = get_soup(NYUKANOW_DRAGONBALL_URL)
+    blocks = extract_nyukanow_store_blocks(soup)
+
+    items: list[LotteryItem] = []
+    stats = {
+        "open_now": 0,
+        "expired": 0,
+        "upcoming": 0,
+        "invalid": 0,
+        "non_lottery": 0,
+        "mixed_tcg": 0,
+        "invite_sale": 0,
+    }
+
+    for store_jp, nodes in blocks:
+        lines = get_nyukanow_block_lines(nodes)
+
+        product_jp = get_nyukanow_field_value(lines, {"対象商品"})
+        product_jp = clean_dragonball_product_name(product_jp)
+
+        if not product_jp or not is_dragonball_product_row(product_jp):
+            stats["invalid"] += 1
+            continue
+
+        if is_mixed_tcg_row(product_jp):
+            stats["mixed_tcg"] += 1
+            continue
+
+        method_text = (
+            get_nyukanow_field_value(lines, {"抽選形式"})
+            or get_nyukanow_field_value(lines, {"販売形式"})
+        )
+
+        if not is_strict_dragonball_lottery_block(store_jp, product_jp, method_text, lines):
+            if (
+                DRAGONBALL_STRICT_LOTTERY_ONLY
+                and not DRAGONBALL_INCLUDE_INVITE_SALES
+                and is_dragonball_invite_sale(method_text, lines)
+                and not is_explicit_dragonball_lottery_method(method_text)
+            ):
+                stats["invite_sale"] += 1
+            else:
+                stats["non_lottery"] += 1
+            continue
+
+        start_raw = get_nyukanow_field_value(lines, {"開始日"})
+        end_raw = get_nyukanow_field_value(lines, {"終了日", "締切", "応募終了"})
+
+        date_window = build_nyukanow_date_window(start_raw, end_raw)
+
+        if date_window.is_expired:
+            stats["expired"] += 1
+            continue
+
+        if date_window.is_upcoming:
+            stats["upcoming"] += 1
+
+            if ACTIVE_ONLY or not NOTIFY_UPCOMING:
+                continue
+
+        if ACTIVE_ONLY and not date_window.is_open_now:
+            continue
+
+        raffle_type, area_jp, area_en = infer_dragonball_raffle_type(method_text, store_jp)
+        lottery_url = extract_nyukanow_relevant_link(nodes)
+        status = "Upcoming" if date_window.is_upcoming else "Active"
+
+        item = LotteryItem(
+            expansion_jp=product_jp,
+            expansion_en=translate_ja_to_en(product_jp),
+
+            place_jp=store_jp,
+            place_en=translate_ja_to_en(store_jp),
+
+            area_jp=area_jp,
+            area_en=area_en,
+
+            raffle_type=raffle_type,
+
+            date_raw=date_window.raw,
+            date_en=date_window.label_en,
+
+            start_iso=date_window.start.isoformat() if date_window.start else None,
+            end_iso=date_window.end.isoformat() if date_window.end else None,
+
+            status=status,
+
+            lottery_url=lottery_url,
+            source_url=NYUKANOW_DRAGONBALL_URL,
+
+            brand="Dragon Ball",
+            source_label="Nyuka Now",
+        )
+
+        items.append(item)
+        stats["open_now"] += 1
+
+        if len(items) >= MAX_DRAGONBALL_ITEMS:
+            break
+
+    unique: dict[str, LotteryItem] = {}
+
+    for item in items:
+        key = (
+            f"{item.brand}|"
+            f"{item.expansion_jp}|"
+            f"{item.place_jp}|"
+            f"{item.area_jp}|"
+            f"{item.date_raw}|"
+            f"{item.lottery_url or ''}"
+        )
+        unique[key] = item
+
+    return list(unique.values()), stats
+
+
+# ============================================================
 # TELEGRAM
 # ============================================================
 
@@ -1184,6 +1671,8 @@ def build_message(item: LotteryItem) -> str:
 
     if item.brand == "One Piece":
         title = "🏴‍☠️ New One Piece TCG JP Lottery"
+    elif item.brand == "Dragon Ball":
+        title = "🐉 New Dragon Ball TCG JP Lottery"
     else:
         title = "🎯 New Pokémon TCG JP Lottery"
 
@@ -1272,7 +1761,12 @@ def build_summary_entry(index: int, item: LotteryItem) -> str:
     if item.place_en != item.place_jp:
         place_line = f"{item.place_en} / {item.place_jp}"
 
-    brand_icon = "🏴‍☠️" if item.brand == "One Piece" else "🎯"
+    if item.brand == "One Piece":
+        brand_icon = "🏴‍☠️"
+    elif item.brand == "Dragon Ball":
+        brand_icon = "🐉"
+    else:
+        brand_icon = "🎯"
 
     lines = [
         f"<b>{index}) {brand_icon} {html.escape(expansion_line)}</b>",
@@ -1316,9 +1810,10 @@ def build_summary_messages(items: list[LotteryItem]) -> list[str]:
 
     pokemon_items = [item for item in items if item.brand == "Pokémon"]
     onepiece_items = [item for item in items if item.brand == "One Piece"]
+    dragonball_items = [item for item in items if item.brand == "Dragon Ball"]
     other_items = [
         item for item in items
-        if item.brand not in {"Pokémon", "One Piece"}
+        if item.brand not in {"Pokémon", "One Piece", "Dragon Ball"}
     ]
 
     header = (
@@ -1374,6 +1869,7 @@ def build_summary_messages(items: list[LotteryItem]) -> list[str]:
 
     append_section("🎯 <b>Pokémon Raffles</b>", pokemon_items)
     append_section("🏴‍☠️ <b>One Piece Raffles</b>", onepiece_items)
+    append_section("🐉 <b>Dragon Ball Raffles</b>", dragonball_items)
     append_section("🎴 <b>Other TCG Raffles</b>", other_items)
 
     if current_message.strip() != header.strip():
@@ -1536,7 +2032,7 @@ def check_once() -> tuple[int, int, int, int, int]:
         except Exception as exc:
             print(f"Errore parsing Cardchusen One Piece: {exc}")
             rows = []
-            stats = {"open_now": 0, "upcoming": 0, "expired": 0, "invalid": 0}
+            stats = {"open_now": 0, "upcoming": 0, "expired": 0, "invalid": 0, "non_lottery": 0, "mixed_tcg": 0}
 
         total_open_now += len(rows)
         total_upcoming += stats.get("upcoming", 0)
@@ -1552,6 +2048,41 @@ def check_once() -> tuple[int, int, int, int, int]:
                 f"{stats.get('upcoming', 0)} upcoming ignorate, "
                 f"{stats.get('expired', 0)} scadute ignorate, "
                 f"{stats.get('invalid', 0)} righe non valide"
+            )
+
+            for item in rows[:10]:
+                print(
+                    f"  - {item.expansion_en} / {item.expansion_jp} | "
+                    f"{item.place_en} | {item.raffle_type} | {item.date_en}"
+                )
+
+        total_sent += send_new_items(rows, first_run)
+
+    if ENABLE_DRAGONBALL:
+        try:
+            rows, stats = extract_nyukanow_dragonball_rows()
+        except Exception as exc:
+            print(f"Errore parsing Nyuka Now Dragon Ball: {exc}")
+            rows = []
+            stats = {"open_now": 0, "upcoming": 0, "expired": 0, "invalid": 0, "non_lottery": 0, "mixed_tcg": 0, "invite_sale": 0}
+
+        total_open_now += len(rows)
+        total_upcoming += stats.get("upcoming", 0)
+        total_expired += stats.get("expired", 0)
+        total_invalid += stats.get("invalid", 0)
+
+        all_active_items.extend(rows)
+
+        if DEBUG:
+            print(
+                "Dragon Ball | Nyuka Now: "
+                f"{len(rows)} attive ora inviabili, "
+                f"{stats.get('upcoming', 0)} upcoming ignorate, "
+                f"{stats.get('expired', 0)} scadute ignorate, "
+                f"{stats.get('invalid', 0)} righe non valide, "
+                f"{stats.get('non_lottery', 0)} non-lottery ignorate, "
+                f"{stats.get('invite_sale', 0)} invite-sale ignorate, "
+                f"{stats.get('mixed_tcg', 0)} righe miste ignorate"
             )
 
             for item in rows[:10]:
@@ -1582,7 +2113,12 @@ def print_startup_info() -> None:
     print(f"Max articoli/espansioni Pokémon analizzate: {MAX_ARTICLES}")
     print(f"Pokémon abilitato: {'sì' if ENABLE_POKEMON else 'no'}")
     print(f"One Piece abilitato: {'sì' if ENABLE_ONEPIECE else 'no'}")
+    print(f"Dragon Ball abilitato: {'sì' if ENABLE_DRAGONBALL else 'no'}")
     print(f"Max raffle One Piece analizzate: {MAX_ONEPIECE_ITEMS}")
+    print(f"Max raffle Dragon Ball analizzate: {MAX_DRAGONBALL_ITEMS}")
+    print(f"Dragon Ball solo lotterie strict: {'sì' if DRAGONBALL_STRICT_LOTTERY_ONLY else 'no'}")
+    print(f"Dragon Ball include invite-sales: {'sì' if DRAGONBALL_INCLUDE_INVITE_SALES else 'no'}")
+    print(f"Dragon Ball ignora righe TCG miste: {'sì' if DRAGONBALL_SKIP_MIXED_TCG_ROWS else 'no'}")
     print(f"Invio notifiche singole: {'sì' if SEND_INDIVIDUAL_NOTIFICATIONS else 'no'}")
     print(f"Invio al primo avvio: {'sì' if SEND_ON_FIRST_RUN else 'no'}")
     print(f"Invio riepilogo giornaliero: {'sì' if SEND_DAILY_SUMMARY else 'no'}")
