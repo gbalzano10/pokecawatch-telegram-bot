@@ -8,7 +8,7 @@ import json
 import sqlite3
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import urljoin
 
@@ -25,6 +25,8 @@ load_dotenv()
 
 BASE_URL = "https://pokecawatch.com"
 CATEGORY_URL = "https://pokecawatch.com/category/%E6%8A%BD%E9%81%B8%E3%83%BB%E4%BA%88%E7%B4%84%E6%83%85%E5%A0%B1"
+
+CARDCHUSEN_ONEPIECE_URL = "https://www.cardchusen.com/onepiece"
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -87,6 +89,16 @@ SEND_EMPTY_SUMMARY = os.getenv("SEND_EMPTY_SUMMARY", "0").strip().lower() in {
     "1", "true", "yes", "si", "sì"
 }
 
+ENABLE_POKEMON = os.getenv("ENABLE_POKEMON", "1").strip().lower() in {
+    "1", "true", "yes", "si", "sì"
+}
+
+ENABLE_ONEPIECE = os.getenv("ENABLE_ONEPIECE", "0").strip().lower() in {
+    "1", "true", "yes", "si", "sì"
+}
+
+MAX_ONEPIECE_ITEMS = int(os.getenv("MAX_ONEPIECE_ITEMS", "30"))
+
 DB_PATH = os.getenv("DB_PATH", "data/sent_lotteries.db")
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -146,6 +158,9 @@ class LotteryItem:
     lottery_url: str | None
     source_url: str
 
+    brand: str = "Pokémon"
+    source_label: str = "Pokecawatch"
+
 
 # ============================================================
 # PREFECTURES / COMMON TRANSLATIONS
@@ -180,6 +195,24 @@ COMMON_TRANSLATIONS = {
     "ドラゴンスター": "Dragon Star",
     "GEO": "GEO",
     "Amazon": "Amazon",
+
+    "プレミアムバンダイ": "Premium Bandai",
+    "ノジマオンライン": "Nojima Online",
+    "カードランド秋葉原": "Cardland Akihabara",
+    "キデイランド吉祥寺店": "Kiddy Land Kichijoji",
+    "少年ジャンプ+ / ゼブラック": "Shonen Jump+ / Zebrack",
+    "トレカSHOPあんりみてっど": "Toreca SHOP Unlimited",
+    "トレーディングカードピット仙台駅東口店": "Trading Card Pit Sendai Station East Exit",
+    "プレイズ名駅店": "Preyz Meieki",
+    "ふるいちトップブックス伊勢崎茂呂": "Furuichi Top Books Isesaki Moro",
+
+    "決戦の刻": "The Moment of Decisive Battle",
+    "受け継がれる意志": "OP-13 - Carrying On His Will",
+    "世界最強の戦士": "World's Strongest Warrior",
+    "神の島の冒険": "OP-15 - Adventure on the Island of the Gods",
+    "蒼海の七傑": "The Azure Sea's Seven",
+    "新たなる皇帝 [OP-09]": "OP-09 - The New Emperor",
+    "29周年記念プロモ8枚セット": "29th Anniversary Promo 8-Card Set",
 
     "北海道": "Hokkaido",
     "青森県": "Aomori",
@@ -438,6 +471,10 @@ def normalize_date_text(text: str) -> str:
 
     text = text.replace("午前", "")
     text = text.replace("午後", "")
+
+    # Cardchusen often writes dates like 7/23(木) 23:00.
+    # Remove the Japanese weekday marker so the generic date parser can read the hour.
+    text = re.sub(r"[（(][月火水木金土日][）)]", "", text)
 
     return clean_text(text)
 
@@ -855,6 +892,242 @@ def extract_lottery_rows(article: Article) -> tuple[list[LotteryItem], dict[str,
 
     for item in items:
         key = (
+            f"{item.brand}|"
+            f"{item.expansion_jp}|"
+            f"{item.place_jp}|"
+            f"{item.area_jp}|"
+            f"{item.date_raw}|"
+            f"{item.lottery_url or ''}"
+        )
+        unique[key] = item
+
+    return list(unique.values()), stats
+
+
+
+# ============================================================
+# CARDCHUSEN ONE PIECE PARSER
+# ============================================================
+
+CARDCHUSEN_METHOD_KEYWORDS = {
+    "オンライン",
+    "店頭",
+    "会員",
+    "アプリ",
+    "SNS応募",
+    "本人確認",
+}
+
+
+def is_cardchusen_method_line(line: str) -> bool:
+    line = clean_text(line)
+
+    if not line:
+        return False
+
+    if "抽選" in line:
+        return False
+
+    return line.startswith("オンライン") or line.startswith("店頭")
+
+
+def is_cardchusen_extra_method_line(line: str) -> bool:
+    line = clean_text(line)
+
+    if not line:
+        return True
+
+    if line in CARDCHUSEN_METHOD_KEYWORDS:
+        return True
+
+    parts = line.split()
+    if parts and all(part in CARDCHUSEN_METHOD_KEYWORDS for part in parts):
+        return True
+
+    return False
+
+
+def clean_cardchusen_store_name(text: str) -> str:
+    text = clean_text(text)
+    text = text.replace("・ ワンピ", "")
+    text = text.replace("・ワンピ", "")
+    return clean_text(text)
+
+
+def parse_cardchusen_date_window(raw_date: str) -> DateWindow | None:
+    raw_date = clean_text(raw_date)
+
+    if not raw_date:
+        return None
+
+    if "調査中" in raw_date or raw_date == "締切":
+        return None
+
+    now = datetime.now(JST)
+
+    if raw_date.startswith("本日") or raw_date.startswith("今日"):
+        raw_date = raw_date.replace("本日", f"{now.month}/{now.day}", 1)
+        raw_date = raw_date.replace("今日", f"{now.month}/{now.day}", 1)
+
+    if raw_date.startswith("明日"):
+        tomorrow = now + timedelta(days=1)
+        raw_date = raw_date.replace("明日", f"{tomorrow.month}/{tomorrow.day}", 1)
+
+    return parse_date_window(raw_date)
+
+
+def get_cardchusen_application_links(soup: BeautifulSoup) -> list[str]:
+    links: list[str] = []
+
+    for link in soup.find_all("a", href=True):
+        text = clean_text(link.get_text(" ", strip=True))
+
+        if "応募ページ" not in text and "詳細ページ" not in text:
+            continue
+
+        href = clean_text(link.get("href", ""))
+
+        if not href or href.startswith("#"):
+            continue
+
+        links.append(urljoin(CARDCHUSEN_ONEPIECE_URL, href))
+
+    return links
+
+
+def get_cardchusen_active_lines(soup: BeautifulSoup) -> list[str]:
+    lines = [
+        clean_text(line)
+        for line in soup.get_text("\n", strip=True).splitlines()
+        if clean_text(line)
+    ]
+
+    start_index = 0
+    for index, line in enumerate(lines):
+        if line.startswith("全") and "件" in line and "最終更新" in line:
+            start_index = index + 1
+            break
+
+    end_index = len(lines)
+    for index in range(start_index, len(lines)):
+        line = lines[index]
+        if "終了済のワンピースカード抽選販売" in line:
+            end_index = index
+            break
+        if line == "抽選方法 ✕":
+            end_index = index
+            break
+
+    return lines[start_index:end_index]
+
+
+def extract_cardchusen_onepiece_rows() -> tuple[list[LotteryItem], dict[str, int]]:
+    soup = get_soup(CARDCHUSEN_ONEPIECE_URL)
+    lines = get_cardchusen_active_lines(soup)
+    application_links = get_cardchusen_application_links(soup)
+
+    items: list[LotteryItem] = []
+    stats = {
+        "open_now": 0,
+        "expired": 0,
+        "upcoming": 0,
+        "invalid": 0,
+    }
+
+    link_index = 0
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+
+        if not is_cardchusen_method_line(line):
+            index += 1
+            continue
+
+        method_line = line
+        raffle_type = "Online website" if "オンライン" in method_line else "Physical in-store"
+        area_jp = "オンライン / website" if raffle_type == "Online website" else "店舗"
+
+        cursor = index + 1
+
+        while cursor < len(lines) and is_cardchusen_extra_method_line(lines[cursor]):
+            cursor += 1
+
+        if cursor + 2 >= len(lines):
+            break
+
+        expansion_jp = clean_text(lines[cursor])
+        place_jp = clean_cardchusen_store_name(lines[cursor + 1])
+        date_raw = clean_text(lines[cursor + 2])
+
+        lottery_url = application_links[link_index] if link_index < len(application_links) else None
+        link_index += 1
+
+        date_window = parse_cardchusen_date_window(date_raw)
+
+        if date_window is None:
+            stats["invalid"] += 1
+            index = cursor + 3
+            continue
+
+        if date_window.is_expired:
+            stats["expired"] += 1
+            index = cursor + 3
+            continue
+
+        if date_window.is_upcoming:
+            stats["upcoming"] += 1
+
+            if ACTIVE_ONLY or not NOTIFY_UPCOMING:
+                index = cursor + 3
+                continue
+
+        if ACTIVE_ONLY and not date_window.is_open_now:
+            index = cursor + 3
+            continue
+
+        status = "Upcoming" if date_window.is_upcoming else "Active"
+
+        item = LotteryItem(
+            expansion_jp=expansion_jp,
+            expansion_en=translate_ja_to_en(expansion_jp),
+
+            place_jp=place_jp,
+            place_en=translate_ja_to_en(place_jp),
+
+            area_jp=area_jp,
+            area_en=translate_ja_to_en(area_jp),
+
+            raffle_type=raffle_type,
+
+            date_raw=date_raw,
+            date_en=date_window.label_en,
+
+            start_iso=date_window.start.isoformat() if date_window.start else None,
+            end_iso=date_window.end.isoformat() if date_window.end else None,
+
+            status=status,
+
+            lottery_url=lottery_url,
+            source_url=CARDCHUSEN_ONEPIECE_URL,
+
+            brand="One Piece",
+            source_label="Cardchusen",
+        )
+
+        items.append(item)
+        stats["open_now"] += 1
+
+        if len(items) >= MAX_ONEPIECE_ITEMS:
+            break
+
+        index = cursor + 3
+
+    unique: dict[str, LotteryItem] = {}
+
+    for item in items:
+        key = (
+            f"{item.brand}|"
             f"{item.expansion_jp}|"
             f"{item.place_jp}|"
             f"{item.area_jp}|"
@@ -873,6 +1146,8 @@ def extract_lottery_rows(article: Article) -> tuple[list[LotteryItem], dict[str,
 def make_item_id(item: LotteryItem) -> str:
     raw = "|".join(
         [
+            item.brand,
+            item.source_label,
             item.expansion_jp,
             item.place_jp,
             item.area_jp,
@@ -907,8 +1182,13 @@ def build_message(item: LotteryItem) -> str:
         else:
             raffle_link_block = "\n🔗 <b>Link Raffle:</b> Not available"
 
+    if item.brand == "One Piece":
+        title = "🏴‍☠️ New One Piece TCG JP Lottery"
+    else:
+        title = "🎯 New Pokémon TCG JP Lottery"
+
     message = f"""
-🎯 <b>New Pokémon TCG JP Lottery</b>
+<b>{title}</b>
 
 📦 <b>Expansion name:</b>
 {html.escape(expansion_line)}
@@ -929,7 +1209,7 @@ def build_message(item: LotteryItem) -> str:
 {html.escape(item.status)}
 {raffle_link_block}
 
-📰 <a href="{html.escape(item.source_url)}">Pokecawatch source</a>
+📰 <a href="{html.escape(item.source_url)}">{html.escape(item.source_label)} source</a>
 """.strip()
 
     return message
@@ -992,8 +1272,11 @@ def build_summary_entry(index: int, item: LotteryItem) -> str:
     if item.place_en != item.place_jp:
         place_line = f"{item.place_en} / {item.place_jp}"
 
+    brand_icon = "🏴‍☠️" if item.brand == "One Piece" else "🎯"
+
     lines = [
-        f"<b>{index}) {html.escape(expansion_line)}</b>",
+        f"<b>{index}) {brand_icon} {html.escape(expansion_line)}</b>",
+        f"🎴 <b>Brand:</b> {html.escape(item.brand)}",
         f"📍 <b>Place:</b> {html.escape(place_line)}",
         f"🏷️ <b>Type:</b> {html.escape(item.raffle_type)}",
         f"🗓️ <b>Deadline:</b> {html.escape(item.date_en)}",
@@ -1010,7 +1293,7 @@ def build_summary_entry(index: int, item: LotteryItem) -> str:
         lines.append("🏬 <b>Application:</b> Physical in-store")
 
     lines.append(
-        f'📰 <a href="{html.escape(item.source_url)}">Pokecawatch source</a>'
+        f'📰 <a href="{html.escape(item.source_url)}">{html.escape(item.source_label)} source</a>'
     )
 
     return "\n".join(lines)
@@ -1025,36 +1308,73 @@ def build_summary_messages(items: list[LotteryItem]) -> list[str]:
 
         return [
             (
-                "📌 <b>Active Pokémon TCG JP Raffles</b>\n\n"
+                "📌 <b>Active Japanese TCG Raffles</b>\n\n"
                 f"🕘 <b>Last update:</b> {html.escape(now_label)}\n\n"
                 "No active raffles found at the moment."
             )
         ]
 
+    pokemon_items = [item for item in items if item.brand == "Pokémon"]
+    onepiece_items = [item for item in items if item.brand == "One Piece"]
+    other_items = [
+        item for item in items
+        if item.brand not in {"Pokémon", "One Piece"}
+    ]
+
     header = (
-        "📌 <b>Active Pokémon TCG JP Raffles</b>\n\n"
+        "📌 <b>Active Japanese TCG Raffles</b>\n\n"
         f"🕘 <b>Last update:</b> {html.escape(now_label)}\n"
-        f"🎯 <b>Total active raffles:</b> {len(items)}\n\n"
+        f"🎯 <b>Total active raffles:</b> {len(items)}\n"
+        f"🎯 <b>Pokémon:</b> {len(pokemon_items)}\n"
+        f"🏴‍☠️ <b>One Piece:</b> {len(onepiece_items)}\n"
     )
 
     messages: list[str] = []
-    current_message = header
+    current_message = header + "\n"
     current_count = 0
 
-    for index, item in enumerate(items, start=1):
-        entry = build_summary_entry(index, item)
-        block = entry + "\n\n"
+    def append_section(
+        section_title: str,
+        section_items: list[LotteryItem],
+    ) -> None:
+        nonlocal current_message
+        nonlocal current_count
 
-        if (
-            current_count >= SUMMARY_MAX_ITEMS_PER_MESSAGE
-            or len(current_message) + len(block) > 3600
-        ):
+        if not section_items:
+            return
+
+        section_header = (
+            "\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"{section_title}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+
+        if len(current_message) + len(section_header) > 3600:
             messages.append(current_message.strip())
-            current_message = header
+            current_message = header + "\n"
             current_count = 0
 
-        current_message += block
-        current_count += 1
+        current_message += section_header
+
+        for local_index, item in enumerate(section_items, start=1):
+            entry = build_summary_entry(local_index, item)
+            block = entry + "\n\n"
+
+            if (
+                current_count >= SUMMARY_MAX_ITEMS_PER_MESSAGE
+                or len(current_message) + len(block) > 3600
+            ):
+                messages.append(current_message.strip())
+                current_message = header + section_header
+                current_count = 0
+
+            current_message += block
+            current_count += 1
+
+    append_section("🎯 <b>Pokémon Raffles</b>", pokemon_items)
+    append_section("🏴‍☠️ <b>One Piece Raffles</b>", onepiece_items)
+    append_section("🎴 <b>Other TCG Raffles</b>", other_items)
 
     if current_message.strip() != header.strip():
         messages.append(current_message.strip())
@@ -1063,15 +1383,14 @@ def build_summary_messages(items: list[LotteryItem]) -> list[str]:
         total_parts = len(messages)
         messages = [
             msg.replace(
-                "📌 <b>Active Pokémon TCG JP Raffles</b>",
-                f"📌 <b>Active Pokémon TCG JP Raffles</b> — Part {i}/{total_parts}",
+                "📌 <b>Active Japanese TCG Raffles</b>",
+                f"📌 <b>Active Japanese TCG Raffles</b> — Part {i}/{total_parts}",
                 1,
             )
             for i, msg in enumerate(messages, start=1)
         ]
 
     return messages
-
 
 def make_summary_id(items: list[LotteryItem]) -> str:
     today = datetime.now(JST).strftime("%Y-%m-%d")
@@ -1091,6 +1410,7 @@ def send_daily_summary(items: list[LotteryItem]) -> None:
 
     for item in items:
         key = (
+            f"{item.brand}|"
             f"{item.expansion_jp}|"
             f"{item.place_jp}|"
             f"{item.area_jp}|"
@@ -1132,15 +1452,42 @@ def send_daily_summary(items: list[LotteryItem]) -> None:
 # MAIN CHECK
 # ============================================================
 
+def send_new_items(rows: list[LotteryItem], first_run: bool) -> int:
+    total_sent = 0
+
+    if not SEND_INDIVIDUAL_NOTIFICATIONS:
+        return total_sent
+
+    for item in rows:
+        item_id = make_item_id(item)
+
+        if already_sent(item_id):
+            continue
+
+        if first_run and not SEND_ON_FIRST_RUN:
+            mark_sent(item_id, item)
+            continue
+
+        try:
+            send_telegram_message(item)
+            mark_sent(item_id, item)
+            total_sent += 1
+
+            print(
+                f"Inviata: {item.brand} | "
+                f"{item.expansion_jp} | "
+                f"{item.place_jp} | {item.raffle_type} | "
+                f"{item.date_raw} | {item.status}"
+            )
+
+        except Exception as exc:
+            print(f"Errore invio Telegram: {exc}")
+
+    return total_sent
+
+
 def check_once() -> tuple[int, int, int, int, int]:
     first_run = is_first_run()
-
-    articles = fetch_article_links()
-
-    if DEBUG:
-        print(f"Articoli trovati: {len(articles)}")
-        for article in articles:
-            print(f"- {article.expansion_jp} | {article.url}")
 
     total_open_now = 0
     total_upcoming = 0
@@ -1150,12 +1497,46 @@ def check_once() -> tuple[int, int, int, int, int]:
 
     all_active_items: list[LotteryItem] = []
 
-    for article in articles:
+    if ENABLE_POKEMON:
+        articles = fetch_article_links()
+
+        if DEBUG:
+            print(f"Articoli Pokémon trovati: {len(articles)}")
+            for article in articles:
+                print(f"- {article.expansion_jp} | {article.url}")
+
+        for article in articles:
+            try:
+                rows, stats = extract_lottery_rows(article)
+            except Exception as exc:
+                print(f"Errore parsing articolo Pokémon {article.url}: {exc}")
+                continue
+
+            total_open_now += len(rows)
+            total_upcoming += stats.get("upcoming", 0)
+            total_expired += stats.get("expired", 0)
+            total_invalid += stats.get("invalid", 0)
+
+            all_active_items.extend(rows)
+
+            if DEBUG:
+                print(
+                    f"Pokémon | {article.expansion_jp}: "
+                    f"{len(rows)} attive ora inviabili, "
+                    f"{stats.get('upcoming', 0)} upcoming ignorate, "
+                    f"{stats.get('expired', 0)} scadute ignorate, "
+                    f"{stats.get('invalid', 0)} righe non valide"
+                )
+
+            total_sent += send_new_items(rows, first_run)
+
+    if ENABLE_ONEPIECE:
         try:
-            rows, stats = extract_lottery_rows(article)
+            rows, stats = extract_cardchusen_onepiece_rows()
         except Exception as exc:
-            print(f"Errore parsing articolo {article.url}: {exc}")
-            continue
+            print(f"Errore parsing Cardchusen One Piece: {exc}")
+            rows = []
+            stats = {"open_now": 0, "upcoming": 0, "expired": 0, "invalid": 0}
 
         total_open_now += len(rows)
         total_upcoming += stats.get("upcoming", 0)
@@ -1166,39 +1547,20 @@ def check_once() -> tuple[int, int, int, int, int]:
 
         if DEBUG:
             print(
-                f"{article.expansion_jp}: "
+                "One Piece | Cardchusen: "
                 f"{len(rows)} attive ora inviabili, "
                 f"{stats.get('upcoming', 0)} upcoming ignorate, "
                 f"{stats.get('expired', 0)} scadute ignorate, "
                 f"{stats.get('invalid', 0)} righe non valide"
             )
 
-        if not SEND_INDIVIDUAL_NOTIFICATIONS:
-            continue
-
-        for item in rows:
-            item_id = make_item_id(item)
-
-            if already_sent(item_id):
-                continue
-
-            if first_run and not SEND_ON_FIRST_RUN:
-                mark_sent(item_id, item)
-                continue
-
-            try:
-                send_telegram_message(item)
-                mark_sent(item_id, item)
-                total_sent += 1
-
+            for item in rows[:10]:
                 print(
-                    f"Inviata: {item.expansion_jp} | "
-                    f"{item.place_jp} | {item.raffle_type} | "
-                    f"{item.date_raw} | {item.status}"
+                    f"  - {item.expansion_en} / {item.expansion_jp} | "
+                    f"{item.place_en} | {item.raffle_type} | {item.date_en}"
                 )
 
-            except Exception as exc:
-                print(f"Errore invio Telegram: {exc}")
+        total_sent += send_new_items(rows, first_run)
 
     if SEND_DAILY_SUMMARY:
         try:
@@ -1207,7 +1569,6 @@ def check_once() -> tuple[int, int, int, int, int]:
             print(f"Errore invio daily summary: {exc}")
 
     return total_open_now, total_upcoming, total_expired, total_invalid, total_sent
-
 
 # ============================================================
 # MAIN LOOP
@@ -1218,7 +1579,10 @@ def print_startup_info() -> None:
     print(f"Database: {DB_PATH}")
     print(f"Modalità esecuzione singola RUN_ONCE: {'sì' if RUN_ONCE else 'no'}")
     print(f"Controllo ogni {CHECK_EVERY_SECONDS} secondi.")
-    print(f"Max articoli/espansioni analizzate: {MAX_ARTICLES}")
+    print(f"Max articoli/espansioni Pokémon analizzate: {MAX_ARTICLES}")
+    print(f"Pokémon abilitato: {'sì' if ENABLE_POKEMON else 'no'}")
+    print(f"One Piece abilitato: {'sì' if ENABLE_ONEPIECE else 'no'}")
+    print(f"Max raffle One Piece analizzate: {MAX_ONEPIECE_ITEMS}")
     print(f"Invio notifiche singole: {'sì' if SEND_INDIVIDUAL_NOTIFICATIONS else 'no'}")
     print(f"Invio al primo avvio: {'sì' if SEND_ON_FIRST_RUN else 'no'}")
     print(f"Invio riepilogo giornaliero: {'sì' if SEND_DAILY_SUMMARY else 'no'}")
@@ -1248,10 +1612,12 @@ def print_result(open_now: int, upcoming: int, expired: int, invalid: int, sent:
 
 
 def main() -> None:
-    if not BOT_TOKEN:
+    telegram_required = SEND_INDIVIDUAL_NOTIFICATIONS or SEND_DAILY_SUMMARY or SEND_EMPTY_SUMMARY
+
+    if telegram_required and not BOT_TOKEN:
         raise RuntimeError("Manca TELEGRAM_BOT_TOKEN nel file .env o nei secrets")
 
-    if not CHAT_ID:
+    if telegram_required and not CHAT_ID:
         raise RuntimeError("Manca TELEGRAM_CHAT_ID nel file .env o nei secrets")
 
     init_db()
