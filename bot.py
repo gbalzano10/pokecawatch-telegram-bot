@@ -146,6 +146,9 @@ class LotteryItem:
     lottery_url: str | None
     source_url: str
 
+    brand: str = "Pokémon"
+    source_label: str = "Pokecawatch"
+
 
 # ============================================================
 # PREFECTURES / COMMON TRANSLATIONS
@@ -907,8 +910,13 @@ def build_message(item: LotteryItem) -> str:
         else:
             raffle_link_block = "\n🔗 <b>Link Raffle:</b> Not available"
 
+    if item.brand == "One Piece":
+        title = "🏴‍☠️ New One Piece TCG JP Lottery"
+    else:
+        title = "🎯 New Pokémon TCG JP Lottery"
+
     message = f"""
-🎯 <b>New Pokémon TCG JP Lottery</b>
+<b>{title}</b>
 
 📦 <b>Expansion name:</b>
 {html.escape(expansion_line)}
@@ -929,7 +937,7 @@ def build_message(item: LotteryItem) -> str:
 {html.escape(item.status)}
 {raffle_link_block}
 
-📰 <a href="{html.escape(item.source_url)}">Pokecawatch source</a>
+📰 <a href="{html.escape(item.source_url)}">{html.escape(item.source_label)} source</a>
 """.strip()
 
     return message
@@ -992,8 +1000,11 @@ def build_summary_entry(index: int, item: LotteryItem) -> str:
     if item.place_en != item.place_jp:
         place_line = f"{item.place_en} / {item.place_jp}"
 
+    brand_icon = "🏴‍☠️" if item.brand == "One Piece" else "🎯"
+
     lines = [
-        f"<b>{index}) {html.escape(expansion_line)}</b>",
+        f"<b>{index}) {brand_icon} {html.escape(expansion_line)}</b>",
+        f"🎴 <b>Brand:</b> {html.escape(item.brand)}",
         f"📍 <b>Place:</b> {html.escape(place_line)}",
         f"🏷️ <b>Type:</b> {html.escape(item.raffle_type)}",
         f"🗓️ <b>Deadline:</b> {html.escape(item.date_en)}",
@@ -1010,7 +1021,7 @@ def build_summary_entry(index: int, item: LotteryItem) -> str:
         lines.append("🏬 <b>Application:</b> Physical in-store")
 
     lines.append(
-        f'📰 <a href="{html.escape(item.source_url)}">Pokecawatch source</a>'
+        f'📰 <a href="{html.escape(item.source_url)}">{html.escape(item.source_label)} source</a>'
     )
 
     return "\n".join(lines)
@@ -1025,14 +1036,14 @@ def build_summary_messages(items: list[LotteryItem]) -> list[str]:
 
         return [
             (
-                "📌 <b>Active Pokémon TCG JP Raffles</b>\n\n"
+                "📌 <b>Active Japanese TCG Raffles</b>\n\n"
                 f"🕘 <b>Last update:</b> {html.escape(now_label)}\n\n"
                 "No active raffles found at the moment."
             )
         ]
 
     header = (
-        "📌 <b>Active Pokémon TCG JP Raffles</b>\n\n"
+        "📌 <b>Active Japanese TCG Raffles</b>\n\n"
         f"🕘 <b>Last update:</b> {html.escape(now_label)}\n"
         f"🎯 <b>Total active raffles:</b> {len(items)}\n\n"
     )
@@ -1063,8 +1074,8 @@ def build_summary_messages(items: list[LotteryItem]) -> list[str]:
         total_parts = len(messages)
         messages = [
             msg.replace(
-                "📌 <b>Active Pokémon TCG JP Raffles</b>",
-                f"📌 <b>Active Pokémon TCG JP Raffles</b> — Part {i}/{total_parts}",
+                "📌 <b>Active Japanese TCG Raffles</b>",
+                f"📌 <b>Active Japanese TCG Raffles</b> — Part {i}/{total_parts}",
                 1,
             )
             for i, msg in enumerate(messages, start=1)
